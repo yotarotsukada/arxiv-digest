@@ -54,7 +54,7 @@ Claude Codeに渡して順次実装するためのタスクリスト。各タス
 
 -----
 
-### T02: 設定ファイル読み込み
+### T02: 設定ファイル読み込み ✅ 完了 (2026-05-28)
 
 **目的**: settings.yaml と環境変数の読み込み層を作る
 
@@ -70,9 +70,20 @@ Claude Codeに渡して順次実装するためのタスクリスト。各タス
 - pytest で設定読み込みのテストが通る
 - 必須環境変数欠落時に起動エラーを出す
 
+**成果物**
+
+- `app/config.py`: `AppSettings` (yaml 由来・デフォルト値あり) と `Secrets` (環境変数由来・必須項目あり) に分割。`get_secrets()` / `get_app_settings()` は LRU キャッシュ付き。
+- `config/settings.yaml`: 興味分野・キーワード・コスト上限等のデフォルト値。
+- `config/llm_pricing.yaml`: Groq/Together/OpenAI/Anthropic の単価表。
+- `tests/test_config.py`: 必須環境変数欠落で `ValidationError`、`LLM_API_KEY_*` は使用時 `ValueError`、yaml デフォルト値・上書きの 6 テスト。
+
+**設計判断**
+
+- 必須は `API_AUTH_SECRET` / `LINE_CHANNEL_ACCESS_TOKEN` / `LINE_USER_ID` の 3 つ。LLM の API キーは「使用するプロバイダのみ必要」なので任意扱いとし、`get_llm_api_key(provider)` で取り出す時点で未設定なら `ValueError`。
+
 -----
 
-### T03: ロガー・共通ユーティリティ
+### T03: ロガー・共通ユーティリティ ✅ 完了 (2026-05-28)
 
 **目的**: 構造化ログとエラーハンドリング基盤
 
@@ -87,11 +98,19 @@ Claude Codeに渡して順次実装するためのタスクリスト。各タス
 - ログ出力テストが通る
 - リトライデコレータのテストが通る（モック使用）
 
+**成果物**
+
+- `app/utils/logger.py`: `JsonFormatter` で stdout に Cloud Logging 互換の JSON 1 行を出力。`logger.info("msg", extra={...})` の extra フィールドをそのまま payload に取り込む。
+- `app/utils/retry.py`: `@retry_with_backoff(exceptions=(SomeTransientError,))` で対象例外型を絞れる。指数バックオフ+ジッタ。
+- `app/utils/exceptions.py`: `ArxivDigestError` をベースに `ArxivAPIError` / `LLMAPIError` / `LineAPIError` / `FirestoreError` / `CostLimitExceededError` / `ConfigError`。永続/一時を区別するため `*TransientError` サブクラスを追加（retry の対象はこちらに限定）。
+- `tests/test_logger.py`: フィールド・extra・例外を含む JSON 出力を検証。
+- `tests/test_retry.py`: 成功・複数回失敗→成功・上限超え失敗・非対象例外・指数バックオフ待機時間を検証。
+
 -----
 
 ## M1: コアパイプライン
 
-### T04: arXiv API クライアント
+### T04: arXiv API クライアント ✅ 完了 (2026-05-28)
 
 **目的**: 前日投稿の論文一覧を取得
 
@@ -113,9 +132,20 @@ Claude Codeに渡して順次実装するためのタスクリスト。各タス
 - arXiv API: <https://info.arxiv.org/help/api/index.html>
 - `arxiv` Pythonパッケージが利用可能
 
+**成果物**
+
+- `app/core/fetcher.py`: `ArxivFetcher.fetch_recent(categories, hours, now=None)` で指定時間幅の投稿を返す。`arxiv` ライブラリの `Client(delay_seconds=3, num_retries=0)` を使い、リトライは自前の `@retry_with_backoff(exceptions=(ArxivAPITransientError,))` に委譲。
+- `app/storage/models.py`: `Paper` (arxiv_id, title, abstract, authors, categories, published_at, pdf_url, score?, summary_ja?) を pydantic で定義。
+- `tests/test_fetcher.py`: フェイク client で時間幅外の論文除外・空カテゴリ・通信失敗時のリトライ→`ArxivAPIError`・naive datetime 取り扱いを検証。
+
+**設計判断**
+
+- arxiv API への並び順は `SubmittedDate` 降順。`since` より古いレコードに到達したら以降を読まずに break することで早期打ち切り。
+- arxiv 結果のパース時に問題が起きても warning ログのみで処理は続行（1 件の異常で全件失うのを避ける）。
+
 -----
 
-### T05: Firestore ストレージ層
+### T05: Firestore ストレージ層 ✅ 完了 (2026-05-28)
 
 **目的**: 配信履歴・重複防止データの永続化
 
@@ -131,9 +161,22 @@ Claude Codeに渡して順次実装するためのタスクリスト。各タス
 - emulator上でCRUDが動作
 - 単体テストが通る
 
+**成果物**
+
+- `app/storage/base.py`: `Storage` 抽象クラス。`is_already_sent` / `mark_as_sent` / `save_digest` / `get_digest` / `list_digests` / `get_cost_today` / `add_cost`。
+- `app/storage/memory.py`: `InMemoryStorage` 実装（ローカル開発・テスト・dry-run 用）。
+- `app/storage/firestore.py`: `FirestoreStorage` 実装。`google-cloud-firestore` はオプション依存（`pip install '.[firestore]'`）として、import を `__init__` 内で遅延し、未インストール時は `FirestoreError`。
+- `app/storage/factory.py`: `GOOGLE_CLOUD_PROJECT` または `FIRESTORE_EMULATOR_HOST` の有無で実装を自動切り替え。
+- `app/storage/models.py`: `Paper` / `DigestPaper` / `DigestRecord` / `CostRecord`。
+- `tests/test_storage.py`: `InMemoryStorage` の CRUD・日次コスト累積・日付ごとの分離を 7 テスト。
+
+**動作確認メモ**
+
+- 実 Firestore emulator での動作確認は当環境では未実施（`gcloud emulators` 不可）。emulator 接続コードは `FirestoreStorage` 内に書いてあるが、emulator 上での CRUD は M4 / 本番デプロイ時にユーザー側で確認する想定。コアな CRUD ロジックは `InMemoryStorage` の単体テストでカバーしている。
+
 -----
 
-### T06: 粗フィルタ
+### T06: 粗フィルタ ✅ 完了 (2026-05-28)
 
 **目的**: LLM前段でのルールベース絞り込み
 
@@ -149,9 +192,14 @@ Claude Codeに渡して順次実装するためのタスクリスト。各タス
 - 500件の入力から200件以内に絞れる
 - キーワード加点が期待通り動作する単体テストが通る
 
+**成果物**
+
+- `app/core/filter.py`: `PreFilter(config, storage).apply(papers)`。baseline 1.0 にキーワード正規表現と著者名一致を加点して降順ソート、`max_papers` 件で打ち切り。重複除外は `storage.is_already_sent` で行う。
+- `tests/test_filter.py`: キーワード加点（大文字小文字非依存含む）・著者加点・送信済み除外・500→200 切り詰め・加点なし時のベースライン挙動を 6 テスト。
+
 -----
 
-### T07: LLMプロバイダ抽象化（Groq実装）
+### T07: LLMプロバイダ抽象化（Groq実装） ✅ 完了 (2026-05-28)
 
 **目的**: スコアリングと要約の共通インタフェース、まずはGroqで実装
 
@@ -169,9 +217,21 @@ Claude Codeに渡して順次実装するためのタスクリスト。各タス
 - 実APIで10本程度の論文をスコアリング・要約できる
 - コスト計算が概ね正しい
 
+**成果物**
+
+- `app/providers/llm/base.py`: `LLMProvider` 抽象クラス (`name` / `model` / `score` / `summarize` / `estimate_cost` / `get_usage`)、`Usage` / `TokenUsage` dataclass。
+- `app/providers/llm/prompts.py`: 設計書 §7 のスコアリング・要約プロンプト。
+- `app/providers/llm/pricing.py`: `config/llm_pricing.yaml` を読み込む `PricingTable`。
+- `app/providers/llm/groq.py`: Groq OpenAI 互換 chat completions を `httpx.Client` で呼び出す `GroqProvider`。`score` はバッチ送信（既定 20 件/req、JSON モード）、`summarize` は 1 論文 1 req。HTTP 5xx/429 は `LLMAPITransientError` でリトライ対象、4xx は `LLMAPIError` で即時失敗。`get_usage()` で累積トークンとコスト USD を返す。
+- `tests/test_groq.py`: バッチ JSON パース・順序保持・バッチ分割・要約・5xx リトライ→成功・4xx 即時失敗・コスト見積もり (要約>スコア)・単価未設定時 0・JSON 不正時の `LLMAPIError` を 9 テスト。
+
+**動作確認メモ**
+
+- 実 Groq API キーが当環境では用意できないため「10 本程度の論文を実 API でスコアリング・要約」の検証は未実施。`GROQ_API_KEY` を `.env` に設定したうえでユーザー側で `python -m app.core.pipeline --dry-run --force` を実行することで、実際の API 呼び出しと `get_usage()` のコスト記録を確認できる。HTTP 経路と JSON パースは単体テストでカバー済み。
+
 -----
 
-### T08: パイプラインオーケストレーション
+### T08: パイプラインオーケストレーション ✅ 完了 (2026-05-28)
 
 **目的**: T04-T07を組み合わせて E2E実行
 
@@ -186,6 +246,16 @@ Claude Codeに渡して順次実装するためのタスクリスト。各タス
 
 - CLIから `python -m app.core.pipeline --dry-run` で実行でき、上位5本の要約がコンソールに出る
 - 累積コストが想定範囲内
+
+**成果物**
+
+- `app/core/pipeline.py`: `Pipeline.run(trigger, top_n, force, now)` で設計書 §5 のフロー [1]-[7] を順に実行。[4] のコスト上限チェックは `estimate_cost(score) + estimate_cost(summarize top_n)` を当日累計に加算して判定し、`CostLimitExceededError` を投げる（`force=True` でバイパス）。LLM の累積コストは終了時に `storage.add_cost` で記録。`build_default_pipeline()` ヘルパで `ArxivFetcher` + `PreFilter` + `GroqProvider` + storage 自動選択をまとめる。
+- CLI: `python -m app.core.pipeline --dry-run [--top-n N] [--force]`。起動時に `get_secrets()` を呼んで必須環境変数を検証する。
+- `tests/test_pipeline.py`: 上位 N 件選出と要約・コスト上限ブロック・force でバイパス・空 fetch の `success`・送信済み論文の除外・コスト計上を 6 テスト。
+
+**動作確認メモ**
+
+- 実 arXiv API + 実 Groq API を叩く CLI フルランは API キー未取得のため当環境では未実施。代わりに `Pipeline.run()` を `unittest.mock` で組み立てた E2E 単体テストで [1]-[7] 全段を検証している（上位 N 件のスコア順選出・要約付与・コスト記録）。ユーザー側で `GROQ_API_KEY` を設定したうえで `python -m app.core.pipeline --dry-run` を実行することで、コンソールに上位 5 本の要約が出力されることを確認できる。
 
 -----
 

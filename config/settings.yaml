@@ -1,0 +1,30 @@
+arxiv:
+  categories: [cs.AI, cs.LG, cs.CL, cs.CV, cs.NE, stat.ML]
+  fetch_window_hours: 36
+
+prefilter:
+  max_papers: 200
+  keywords_boost:
+    - {pattern: "large language model|LLM", weight: 3}
+    - {pattern: "RAG|retrieval[- ]augmented", weight: 3}
+    - {pattern: "agent", weight: 2}
+    - {pattern: "diffusion", weight: 2}
+    - {pattern: "reasoning|chain[- ]of[- ]thought", weight: 2}
+    - {pattern: "multimodal|vision[- ]language", weight: 2}
+  authors_boost:
+    - {name: "Yann LeCun", weight: 2}
+
+digest:
+  top_n: 5
+  schedule_jst: "06:30"
+
+llm:
+  default_provider: groq
+  default_model: llama-3.3-70b-versatile
+
+cost:
+  daily_limit_usd: 1.0
+  alert_threshold_ratio: 0.8
+
+line:
+  message_format: text
