@@ -7,10 +7,11 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 WORKDIR /app
 
-COPY requirements.txt ./
-RUN pip install -r requirements.txt
-
+# 依存だけ先に解決してレイヤキャッシュを効かせる
+COPY pyproject.toml README.md ./
 COPY app ./app
+RUN pip install .
+
 COPY config ./config
 
 EXPOSE 8080

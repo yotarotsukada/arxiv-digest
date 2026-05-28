@@ -70,24 +70,25 @@ class ArxivFetcher:
             sort_order=arxiv.SortOrder.Descending,
         )
 
-        try:
-            results = list(self._client.results(search))
-        except Exception as exc:  # arxiv lib は様々な例外を投げる
-            raise ArxivAPITransientError(f"arXiv API 呼び出しに失敗: {exc}") from exc
-
+        # arxiv.Client.results() はページング generator なので、`list()` で
+        # 取り切らず for で回す。`since` より古い投稿に到達した時点で break すれば
+        # 残りページを取得するための余分な API 呼び出しが発生しない。
         papers: list[Paper] = []
-        for r in results:
-            published = self._to_utc(r.published)
-            if published < since:
-                # SubmittedDate 降順なので、ここで打ち切ってよい
-                break
-            try:
-                papers.append(self._to_paper(r))
-            except Exception as exc:
-                _logger.warning(
-                    "arxiv_result_parse_failed",
-                    extra={"error": str(exc), "arxiv_id": getattr(r, "entry_id", None)},
-                )
+        try:
+            for r in self._client.results(search):
+                published = self._to_utc(r.published)
+                if published < since:
+                    # SubmittedDate 降順なので、ここで打ち切ってよい
+                    break
+                try:
+                    papers.append(self._to_paper(r))
+                except Exception as exc:
+                    _logger.warning(
+                        "arxiv_result_parse_failed",
+                        extra={"error": str(exc), "arxiv_id": getattr(r, "entry_id", None)},
+                    )
+        except Exception as exc:  # arxiv lib はページング途中でも例外を投げる
+            raise ArxivAPITransientError(f"arXiv API 呼び出しに失敗: {exc}") from exc
 
         _logger.info(
             "arxiv_fetched",

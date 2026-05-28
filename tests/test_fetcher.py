@@ -78,6 +78,33 @@ def test_fetch_recent_retries_then_raises_arxiv_api_error(monkeypatch):
     assert client.results.call_count == 3
 
 
+def test_fetch_recent_stops_iterating_after_first_old_paper():
+    """SubmittedDate 降順で、`since` より古いに到達した時点でジェネレータを
+    打ち切ることを確認 (= 残りページは fetch されない)。
+    """
+    now = datetime(2026, 5, 28, 12, 0, tzinfo=timezone.utc)
+    yielded: list[str] = []
+
+    def _iter(_search):
+        # i=0,1: 時間幅内 / i=2: 直後に古いので break / i=3,4: 取得されるべきでない
+        for i in range(5):
+            arxiv_id = f"2405.0000{i}"
+            published = now - timedelta(hours=10 if i < 2 else 72)
+            r = _FakeResult(arxiv_id, f"T{i}", "abs", ["A"], ["cs.AI"], published)
+            yielded.append(arxiv_id)
+            yield r
+
+    client = MagicMock()
+    client.results.side_effect = _iter
+    fetcher = ArxivFetcher(client=client)
+
+    papers = fetcher.fetch_recent(categories=["cs.AI"], hours=36, now=now)
+
+    assert [p.arxiv_id for p in papers] == ["2405.00000", "2405.00001"]
+    # 3 件目 (古い) を yield した時点で break、4,5 件目は yield されない
+    assert yielded == ["2405.00000", "2405.00001", "2405.00002"]
+
+
 def test_fetch_recent_handles_naive_datetime():
     now = datetime(2026, 5, 28, 12, 0, tzinfo=timezone.utc)
     # tzinfo なしの published

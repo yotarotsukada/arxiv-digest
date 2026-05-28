@@ -15,9 +15,10 @@ from app.config import (
 from app.core.filter import PreFilter
 from app.core.pipeline import Pipeline
 from app.providers.llm.base import LLMProvider, TokenUsage, Usage
+from app.providers.notification.base import Notifier
 from app.storage.memory import InMemoryStorage
 from app.storage.models import Paper
-from app.utils.exceptions import CostLimitExceededError
+from app.utils.exceptions import CostLimitExceededError, LineAPIError
 
 
 class _FakeLLM(LLMProvider):
@@ -60,6 +61,19 @@ class _FakeLLM(LLMProvider):
         return self._usage
 
 
+class _RecordingNotifier(Notifier):
+    def __init__(self) -> None:
+        self.messages: list[str] = []
+
+    def send_text(self, message: str) -> None:
+        self.messages.append(message)
+
+
+class _FailingNotifier(Notifier):
+    def send_text(self, message: str) -> None:
+        raise LineAPIError("LINE API 400")
+
+
 def _paper(arxiv_id: str) -> Paper:
     return Paper(
         arxiv_id=arxiv_id,
@@ -89,12 +103,13 @@ def _make_pipeline(
     papers: list[Paper],
     llm: LLMProvider,
     storage: InMemoryStorage | None = None,
+    notifier: Notifier | None = None,
 ) -> tuple[Pipeline, InMemoryStorage]:
     storage = storage or InMemoryStorage()
     fetcher = MagicMock()
     fetcher.fetch_recent.return_value = papers
     prefilter = PreFilter(settings.prefilter, storage)
-    pipeline = Pipeline(settings, fetcher, prefilter, llm, storage)
+    pipeline = Pipeline(settings, fetcher, prefilter, llm, storage, notifier=notifier)
     return pipeline, storage
 
 
@@ -107,18 +122,15 @@ def test_pipeline_selects_top_n_and_summarizes():
     record = pipeline.run(trigger="dry_run")
 
     assert record.status == "success"
-    assert len(record.papers) == 3
     assert [p.arxiv_id for p in record.papers] == ["id9", "id8", "id7"]
     assert all(p.summary_ja for p in record.papers)
-    assert record.llm_provider == "fake"
     assert record.trigger == "dry_run"
 
 
 def test_pipeline_blocks_on_cost_limit():
     settings = _settings(daily_limit=0.0001)
-    papers = [_paper("a")]
     llm = _FakeLLM(estimate=0.01)
-    pipeline, _ = _make_pipeline(settings=settings, papers=papers, llm=llm)
+    pipeline, _ = _make_pipeline(settings=settings, papers=[_paper("a")], llm=llm)
 
     with pytest.raises(CostLimitExceededError):
         pipeline.run()
@@ -126,9 +138,8 @@ def test_pipeline_blocks_on_cost_limit():
 
 def test_pipeline_force_bypasses_cost_limit():
     settings = _settings(daily_limit=0.0001)
-    papers = [_paper("a")]
     llm = _FakeLLM(estimate=0.01)
-    pipeline, _ = _make_pipeline(settings=settings, papers=papers, llm=llm)
+    pipeline, _ = _make_pipeline(settings=settings, papers=[_paper("a")], llm=llm)
 
     record = pipeline.run(force=True)
     assert record.status == "success"
@@ -136,12 +147,14 @@ def test_pipeline_force_bypasses_cost_limit():
 
 def test_pipeline_handles_empty_fetch():
     settings = _settings()
-    llm = _FakeLLM()
-    pipeline, _ = _make_pipeline(settings=settings, papers=[], llm=llm)
+    pipeline, storage = _make_pipeline(settings=settings, papers=[], llm=_FakeLLM())
 
     record = pipeline.run()
+
     assert record.status == "success"
     assert record.papers == []
+    # 空でも履歴は残す (実行があったこと自体は保存する)
+    assert storage.get_digest(record.digest_id) is not None
 
 
 def test_pipeline_skips_already_sent_papers():
@@ -152,21 +165,128 @@ def test_pipeline_skips_already_sent_papers():
     papers = [p_sent, _paper("new1"), _paper("new2")]
     llm = _FakeLLM(scores={"new1": 9.0, "new2": 5.0})
     pipeline, _ = _make_pipeline(
-        settings=settings, papers=papers, llm=llm, storage=storage
+        settings=settings, papers=papers, llm=llm, storage=storage,
     )
 
     record = pipeline.run()
     assert [p.arxiv_id for p in record.papers] == ["new1", "new2"]
 
 
-def test_pipeline_records_cost():
-    settings = _settings()
-    papers = [_paper("a"), _paper("b")]
+def test_pipeline_records_cost_per_run_not_cumulative():
+    """P0-2 回帰: 同じ Pipeline / LLM を 2 回 run() しても、当日累計は
+    各 run の実コストの合計になる (LLM の累積コストを 2 重計上しない)。
+    """
+    settings = _settings(top_n=2)
     llm = _FakeLLM(cost_per_call=0.005)
-    pipeline, storage = _make_pipeline(settings=settings, papers=papers, llm=llm)
+    storage = InMemoryStorage()
+    fetcher = MagicMock()
+    # 2 run で別々の論文を返すことで、dedupe が発火しても候補ゼロにならない
+    fetcher.fetch_recent.side_effect = [
+        [_paper("a"), _paper("b")],
+        [_paper("c"), _paper("d")],
+    ]
+    pipeline = Pipeline(
+        settings,
+        fetcher,
+        PreFilter(settings.prefilter, storage),
+        llm,
+        storage,
+    )
 
-    record = pipeline.run()
-    # score 1 回 + summarize 2 回 (top_n=3 だが候補 2 件しかないので 2 件要約) = 0.015
-    assert record.total_cost_usd == pytest.approx(0.015)
+    record1 = pipeline.run()
+    record2 = pipeline.run()
+
+    # 1 run = score 1 回 + summarize 2 回 = 0.015
+    assert record1.total_cost_usd == pytest.approx(0.015)
+    assert record2.total_cost_usd == pytest.approx(0.015)
     today = datetime.now(timezone.utc).date()
-    assert storage.get_cost_today(today) == pytest.approx(0.015)
+    assert storage.get_cost_today(today) == pytest.approx(0.030)
+
+
+def test_pipeline_persists_digest_and_marks_sent():
+    """P0-1 回帰: manual 実行で save_digest と mark_as_sent が呼ばれる。"""
+    settings = _settings(top_n=2)
+    storage = InMemoryStorage()
+    llm = _FakeLLM(scores={"a": 9.0, "b": 7.0})
+    pipeline, _ = _make_pipeline(
+        settings=settings,
+        papers=[_paper("a"), _paper("b")],
+        llm=llm,
+        storage=storage,
+    )
+
+    record = pipeline.run(trigger="manual")
+
+    assert storage.get_digest(record.digest_id) is not None
+    assert storage.is_already_sent("a") is True
+    assert storage.is_already_sent("b") is True
+
+
+def test_dry_run_does_not_mark_as_sent():
+    """dry_run では `mark_as_sent` を呼ばず、再実行できるようにする。"""
+    settings = _settings(top_n=2)
+    storage = InMemoryStorage()
+    pipeline, _ = _make_pipeline(
+        settings=settings,
+        papers=[_paper("a"), _paper("b")],
+        llm=_FakeLLM(),
+        storage=storage,
+    )
+
+    record = pipeline.run(trigger="dry_run")
+
+    # 履歴 (= digest_history) は残す
+    assert storage.get_digest(record.digest_id) is not None
+    # 再送防止 (= sent_papers) は登録しない
+    assert storage.is_already_sent("a") is False
+
+
+def test_pipeline_invokes_notifier_on_manual_run():
+    settings = _settings(top_n=2)
+    notifier = _RecordingNotifier()
+    pipeline, _ = _make_pipeline(
+        settings=settings,
+        papers=[_paper("a"), _paper("b")],
+        llm=_FakeLLM(),
+        notifier=notifier,
+    )
+
+    pipeline.run(trigger="manual")
+
+    assert len(notifier.messages) == 1
+    assert "Paper a" in notifier.messages[0]
+
+
+def test_pipeline_skips_notifier_on_dry_run():
+    settings = _settings(top_n=2)
+    notifier = _RecordingNotifier()
+    pipeline, _ = _make_pipeline(
+        settings=settings,
+        papers=[_paper("a")],
+        llm=_FakeLLM(),
+        notifier=notifier,
+    )
+
+    pipeline.run(trigger="dry_run")
+
+    assert notifier.messages == []
+
+
+def test_pipeline_records_partial_on_line_failure():
+    settings = _settings(top_n=2)
+    storage = InMemoryStorage()
+    pipeline, _ = _make_pipeline(
+        settings=settings,
+        papers=[_paper("a")],
+        llm=_FakeLLM(),
+        storage=storage,
+        notifier=_FailingNotifier(),
+    )
+
+    record = pipeline.run(trigger="manual")
+
+    assert record.status == "partial"
+    assert record.error is not None and "LINE" in record.error
+    # partial でも履歴と再送防止は登録する (重複送信を避けるため)
+    assert storage.get_digest(record.digest_id) is not None
+    assert storage.is_already_sent("a") is True

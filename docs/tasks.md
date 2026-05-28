@@ -7,6 +7,7 @@ Claude Codeに渡して順次実装するためのタスクリスト。各タス
 - 各タスクごとに「実装 → 単体テスト → 動作確認」のサイクルで進める
 - タスク完了の判定は明示した「完了条件」で行う
 - ブロッカー発生時は次タスクに進まず先に解消する
+- 完了マーク運用: 完了条件をすべて検証できたら `✅ 完了`、実 API / 実環境での動作確認が必要なものを未実施で済ませる場合は `⚠️ 一部条件未検証` を付け、未検証項目と再現手順を成果物の下に書き残す
 
 -----
 
@@ -51,6 +52,10 @@ Claude Codeに渡して順次実装するためのタスクリスト。各タス
 **動作確認メモ**
 
 - 当作業環境では Docker デーモンが使えないため、`uvicorn app.main:app` を直接起動して `curl http://127.0.0.1:8080/healthz` が `200 {"status":"ok"}` を返すことを確認した。Dockerfile / compose は標準構成で、同じ uvicorn コマンドをコンテナ上でも実行する想定。
+
+**追補 (P0-4 対応, 2026-05-28)**
+
+- 初版は `app/main.py` に Secrets バリデーション / `configure_logging()` の起動フックを置いていなかったため、`API_AUTH_SECRET` 等が欠落していても `/healthz` が 200 を返す「ZOMBIE な OK」状態だった。`lifespan` (FastAPI 推奨) に切り替え、起動時に `configure_logging()` → `get_secrets()` を呼ぶようにした。回帰テスト `test_app_lifespan_fails_when_required_env_missing` で `TestClient(app)` を `with` で開いたときに `ValidationError` が出ることを確認。
 
 -----
 
@@ -143,9 +148,13 @@ Claude Codeに渡して順次実装するためのタスクリスト。各タス
 - arxiv API への並び順は `SubmittedDate` 降順。`since` より古いレコードに到達したら以降を読まずに break することで早期打ち切り。
 - arxiv 結果のパース時に問題が起きても warning ログのみで処理は続行（1 件の異常で全件失うのを避ける）。
 
+**追補 (P0-3 対応, 2026-05-28)**
+
+- 初版は `list(self._client.results(search))` で 1000 件 (= ページサイズ 100 × 10 ページ) を全件取り切ってからループしており、設計判断メモにある「早期打ち切り」が実態として効いていなかった。`for r in self._client.results(search):` に切り替え、generator のまま回して `break` で残ページの fetch を止めるよう修正。回帰テスト `test_fetch_recent_stops_iterating_after_first_old_paper` で「`since` より古いに到達した次の yield 以降は呼ばれない」ことを確認している。
+
 -----
 
-### T05: Firestore ストレージ層 ✅ 完了 (2026-05-28)
+### T05: Firestore ストレージ層 ⚠️ 一部条件未検証 (2026-05-28)
 
 **目的**: 配信履歴・重複防止データの永続化
 
@@ -174,6 +183,10 @@ Claude Codeに渡して順次実装するためのタスクリスト。各タス
 
 - 実 Firestore emulator での動作確認は当環境では未実施（`gcloud emulators` 不可）。emulator 接続コードは `FirestoreStorage` 内に書いてあるが、emulator 上での CRUD は M4 / 本番デプロイ時にユーザー側で確認する想定。コアな CRUD ロジックは `InMemoryStorage` の単体テストでカバーしている。
 
+**追補 (P0-5 対応, 2026-05-28)**
+
+- `google-cloud-firestore` を主依存に格上げ (optional extras `[firestore]` を撤廃)。`requirements.txt` を削除して pyproject 一本化、Dockerfile も `pip install .` に変更したことで、`GOOGLE_CLOUD_PROJECT` を埋めた Cloud Run 起動時に `FirestoreStorage.__init__` の import が落ちなくなった。
+
 -----
 
 ### T06: 粗フィルタ ✅ 完了 (2026-05-28)
@@ -199,7 +212,7 @@ Claude Codeに渡して順次実装するためのタスクリスト。各タス
 
 -----
 
-### T07: LLMプロバイダ抽象化（Groq実装） ✅ 完了 (2026-05-28)
+### T07: LLMプロバイダ抽象化（Groq実装） ⚠️ 一部条件未検証 (2026-05-28)
 
 **目的**: スコアリングと要約の共通インタフェース、まずはGroqで実装
 
@@ -231,7 +244,7 @@ Claude Codeに渡して順次実装するためのタスクリスト。各タス
 
 -----
 
-### T08: パイプラインオーケストレーション ✅ 完了 (2026-05-28)
+### T08: パイプラインオーケストレーション ⚠️ 一部条件未検証 (2026-05-28)
 
 **目的**: T04-T07を組み合わせて E2E実行
 
@@ -255,13 +268,18 @@ Claude Codeに渡して順次実装するためのタスクリスト。各タス
 
 **動作確認メモ**
 
-- 実 arXiv API + 実 Groq API を叩く CLI フルランは API キー未取得のため当環境では未実施。代わりに `Pipeline.run()` を `unittest.mock` で組み立てた E2E 単体テストで [1]-[7] 全段を検証している（上位 N 件のスコア順選出・要約付与・コスト記録）。ユーザー側で `GROQ_API_KEY` を設定したうえで `python -m app.core.pipeline --dry-run` を実行することで、コンソールに上位 5 本の要約が出力されることを確認できる。
+- 実 arXiv API + 実 Groq API を叩く CLI フルランは API キー未取得のため当環境では未実施。代わりに `Pipeline.run()` を `unittest.mock` で組み立てた E2E 単体テストで [1]-[9] 全段を検証している（上位 N 件のスコア順選出・要約付与・コスト記録・dry_run/manual の差分・永続化）。ユーザー側で `LLM_API_KEY_GROQ` と `LINE_*` を設定したうえで `python -m app.core.pipeline --dry-run` を実行することで、コンソールに上位 5 本の要約が出力されることを確認できる。
+
+**追補 (P0-1 / P0-2 対応, 2026-05-28)**
+
+- **P0-1**: 初版は `mark_as_sent` / `save_digest` を一切呼ばず、Firestore に切り替えた瞬間に重複防止が崩壊する状態だった。T11 で統合する想定にしていたが、`build_default_pipeline()` が本物の Firestore を選び得るため T08 段階で先送りにできない構造。`run()` 末尾に `_persist()` を追加し、`save_digest` は trigger 問わず、`mark_as_sent` は dry_run 以外で必ず呼ぶようにした。Firestore 障害は要件 §9 に従ってログのみで続行 (例外を raise しない)。
+- **P0-2**: 初版は `self._llm.get_usage().total_cost_usd` (= `GroqProvider` インスタンスの累積) をそのまま `add_cost` と `digest.total_cost_usd` に流していたため、Pipeline を使い回すと当日累計が二次関数的に膨張する。`run()` の冒頭で `cost_before = ...total_cost_usd` を取り、終了時に `after - before` を当 run のコストとして使うよう変更。回帰テスト `test_pipeline_records_cost_per_run_not_cumulative` で 2 連続 run の合算が正しいことを確認。
 
 -----
 
 ## M2: 通知
 
-### T09: LINE Messaging API クライアント
+### T09: LINE Messaging API クライアント ⚠️ 一部条件未検証 (2026-05-28)
 
 **目的**: LINEへの個人DM送信
 
@@ -281,9 +299,19 @@ Claude Codeに渡して順次実装するためのタスクリスト。各タス
 
 - LINE Messaging API: <https://developers.line.biz/ja/reference/messaging-api/>
 
+**成果物**
+
+- `app/providers/notification/base.py`: `Notifier` 抽象 (LINE 以外への拡張余地)。
+- `app/providers/notification/line.py`: `LineNotifier`。`POST /v2/bot/message/push` を `httpx` で呼ぶ。1 メッセージ 5000 文字制限と 1 リクエスト 5 メッセージ制限に従って分割送信し、5xx/429 は `LineAPITransientError` でリトライ、4xx は `LineAPIError` で即時失敗。Developer Console での Bot 作成手順はモジュール docstring に集約 (T19 で iOS Shortcut のセットアップとともに README に拡充予定)。
+- `tests/test_line.py`: Push 呼び出し・改行境界分割・5 通超過時の複数リクエスト分割・空文字スキップ・4xx/5xx の振り分け・改行が無い場合のハードカット・バッチ化ヘルパを 8 テスト。
+
+**動作確認メモ**
+
+- 実 LINE Channel Access Token が当環境に無いため「自分のアカウントに届く」最終確認は未実施。HTTP 経路 (URL / ヘッダ / payload) は単体テストで固定値検証済み。ユーザー側で `.env` に `LINE_CHANNEL_ACCESS_TOKEN` / `LINE_USER_ID` をセットしたうえで `python -m app.core.pipeline --top-n 1` を実行することで実 LINE への到達を確認できる。
+
 -----
 
-### T10: メッセージフォーマッタ
+### T10: メッセージフォーマッタ ✅ 完了 (2026-05-28)
 
 **目的**: 論文情報を読みやすい配信形式に整形
 
@@ -297,9 +325,14 @@ Claude Codeに渡して順次実装するためのタスクリスト。各タス
 
 - 5本のサンプルから整形済みメッセージが生成され、長さが配信制限内
 
+**成果物**
+
+- `app/core/formatter.py`: `format_digest_message(record: DigestRecord) -> str`。日付ヘッダ + 件数、論文ごとに `score` / カテゴリ / タイトル / 著者 (3 名超は「ほか N 名」) / 要約 / URL を区切り線で整形する。配信対象 0 件時の文言も担う。
+- `tests/test_formatter.py`: 全件含まれる・空配信メッセージ・著者切り詰め・5 件のロングサンプルで 1 リクエスト分の上限 (`MAX_TEXT_LENGTH * MAX_MESSAGES_PER_REQUEST = 25000`) 内に収まる・日付含有を 5 テスト。Phase 2 で Flex Message 化する際は本モジュールは触らず別関数を追加して Notifier 側を拡張する想定。
+
 -----
 
-### T11: パイプラインへの通知統合
+### T11: パイプラインへの通知統合 ⚠️ 一部条件未検証 (2026-05-28)
 
 **目的**: フロー [8][9] を統合し、E2E完成
 
@@ -314,6 +347,16 @@ Claude Codeに渡して順次実装するためのタスクリスト。各タス
 
 - 本物のLINEアカウントに5本のサマリーが届く
 - Firestoreに履歴が記録される
+
+**成果物**
+
+- `app/core/pipeline.py`: `Pipeline.__init__` に `notifier: Notifier | None` を追加。[8] NOTIFY は `trigger != "dry_run" and notifier and selected` のときだけ実行し、`LineAPIError` を捕捉した場合は `status="partial"` / `record.error` に詳細を残す。[9] PERSIST は `save_digest` を trigger 問わず実行 (履歴を残すため)、`mark_as_sent` を dry_run 以外で実行 (重複送信防止のため partial でも登録する)。Firestore 障害は要件 §9 に従ってログのみで処理続行。
+- `build_default_pipeline(with_notifier=True)`: 既定で `LineNotifier()` を組み込む。CLI は `--dry-run` 指定時に `with_notifier=False` で構築するため、dry-run なら LINE 系シークレットなしでも CLI 実行を試せる (ただし `get_secrets()` 起動時検証で `LINE_*` 自体は依然必須)。
+- `tests/test_pipeline.py`: P0-1 回帰 (`save_digest` / `mark_as_sent` 呼び出し)、dry_run では `mark_as_sent` を呼ばない、manual で notifier が呼ばれる、dry_run では呼ばれない、LINE 失敗時 `partial` ステータス + 履歴・再送防止登録、を追加。
+
+**動作確認メモ**
+
+- 「本物の LINE アカウントに 5 本届く」「Firestore に履歴が記録される」の最終確認は実 API キー / 実 Firestore (または emulator) が必要なため当環境では未実施。`Pipeline.run()` 単体テストで [8][9] の分岐とステータス遷移はカバー済み。`LLM_API_KEY_GROQ` / `LINE_CHANNEL_ACCESS_TOKEN` / `LINE_USER_ID` を埋め、`GOOGLE_CLOUD_PROJECT` または `FIRESTORE_EMULATOR_HOST` をセットしたうえで `python -m app.core.pipeline --top-n 5` を叩くとユーザー環境で完了条件を満たせる。
 
 -----
 
