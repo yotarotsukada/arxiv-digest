@@ -1,0 +1,33 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+env/
+
+# テスト・ツール
+.pytest_cache/
+.coverage
+htmlcov/
+.mypy_cache/
+.ruff_cache/
+
+# 環境変数・シークレット
+.env
+.env.*
+!.env.example
+
+# エディタ・OS
+.vscode/
+.idea/
+.DS_Store
+
+# 作業用バッファ (CLAUDE.md 参照)
+temp/
+
+# ビルド成果物
+*.log

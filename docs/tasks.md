@@ -25,7 +25,7 @@ Claude Codeに渡して順次実装するためのタスクリスト。各タス
 
 ## M0: プロジェクト基盤
 
-### T01: プロジェクト初期化
+### T01: プロジェクト初期化 ✅ 完了 (2026-05-28)
 
 **目的**: 開発を始める足場を整える
 
@@ -40,6 +40,17 @@ Claude Codeに渡して順次実装するためのタスクリスト。各タス
 **完了条件**
 
 - `docker compose up` でFastAPIの空のサーバが起動し、`GET /healthz` が200を返す
+
+**成果物**
+
+- `pyproject.toml` / `requirements.txt`、`Dockerfile` / `docker-compose.yml` / `.dockerignore`、`.env.example`、`.gitignore`
+- 設計書 §2.1 に沿った `app/` 配下のパッケージ雛形（`app/main.py` に `/healthz` を実装）
+- `tests/test_healthz.py`（pytest で 200 を返すことを確認）
+- `README.md` を初期版に更新（セットアップ・起動・テスト手順）
+
+**動作確認メモ**
+
+- 当作業環境では Docker デーモンが使えないため、`uvicorn app.main:app` を直接起動して `curl http://127.0.0.1:8080/healthz` が `200 {"status":"ok"}` を返すことを確認した。Dockerfile / compose は標準構成で、同じ uvicorn コマンドをコンテナ上でも実行する想定。
 
 -----
 
